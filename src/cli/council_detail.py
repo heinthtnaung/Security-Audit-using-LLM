@@ -1,0 +1,162 @@
+"""Turning what a council run did into what the report can hold.
+
+The run carries each member's answer and evidence, the model behind it, the
+chairman's reasoning and the final vector; this carries all of it into the record,
+for a failed call as for an answered one. It sits in `cli/` because only here may
+both the council and the report be imported.
+"""
+
+from typing import Mapping
+
+from cli.order_declines import in_both_orders
+from council.answer import MemberAnswer, MemberFoundNoEvidence, MemberGuessed, MemberOrderSensitive
+from council.evidence import is_quotation_from
+from council.ruling import Basis, ContestedMetric, SettledMetric, UnresolvedMetric
+from council.run import MemberFailure, OrderReadings
+from council.same_evidence import read_differently
+from report.council_record import (
+    MemberIdentity,
+    MemberSaid,
+    MetricEscalation,
+    MetricRuling,
+    Outcome,
+    SaidKind,
+)
+
+
+def rulings_of(run, advisory_shown: str) -> tuple[MetricRuling, ...]:
+    """Record every metric the council ruled on, and what each member said first."""
+    return tuple(ruling_of(round_, advisory_shown) for round_ in run.rounds)
+
+
+def ruling_of(round_, advisory_shown: str) -> MetricRuling:
+    """Record one metric: the chairman's decision, and every member behind it."""
+    readings = {one.in_order.member.name: one for one in round_.readings}
+    said = tuple(
+        member_said(reply, readings, advisory_shown)
+        for reply in (*round_.replies, *round_.failures)
+    )
+    return MetricRuling(
+        metric=round_.metric,
+        outcome=outcome_of(round_.ruling),
+        said=said,
+        value=value_of(round_.ruling),
+        basis=basis_of(round_.ruling),
+        confidence=confidence_of(round_.ruling),
+        fallback_source=fallback_source_of(round_.ruling),
+        escalation=escalation_of(round_, advisory_shown),
+        same_evidence_different_reading=read_differently(round_.replies, advisory_shown),
+    )
+
+
+def escalation_of(round_, advisory_shown: str) -> MetricEscalation | None:
+    """Record what the escalation model said of a metric the council left open, if asked."""
+    if round_.escalation is None:
+        return None
+    escalation = round_.escalation
+    said = said_by(escalation.reply, advisory_shown)
+    return MetricEscalation(
+        prior=outcome_of(escalation.prior),
+        said=in_both_orders(said, escalation.readings, advisory_shown),
+    )
+
+
+def member_said(reply, readings: Mapping[str, OrderReadings], advisory_shown: str) -> MemberSaid:
+    """Record what one member said, and which order it declined in where it read both."""
+    said = said_by(reply, advisory_shown)
+    if reply.member.name not in readings:
+        return said
+    return in_both_orders(said, readings[reply.member.name], advisory_shown)
+
+
+def said_by(reply, advisory_shown: str) -> MemberSaid:
+    """Record what one member said, naming which of the five things it did."""
+    who = identity_of(reply.member)
+    if isinstance(reply, MemberFailure):
+        return MemberSaid(member=who, kind=SaidKind.FAILED, reason=reply.reason)
+    if isinstance(reply, MemberFoundNoEvidence):
+        return MemberSaid(member=who, kind=SaidKind.DECLINED)
+    if isinstance(reply, MemberOrderSensitive):
+        values = (reply.in_order_value, reply.reversed_value)
+        return MemberSaid(member=who, kind=SaidKind.ORDER_SENSITIVE, order_values=values)
+    if isinstance(reply, MemberGuessed):
+        return MemberSaid(member=who, kind=SaidKind.GUESSED, value=reply.value)
+    return answered_by(reply, who, advisory_shown)
+
+
+def answered_by(reply: MemberAnswer, who: MemberIdentity, advisory_shown: str) -> MemberSaid:
+    """Record an answer with its quotation, and whether that quotation checked out."""
+    # Whether it verified decided the metric, so it travels with the quotation.
+    return MemberSaid(
+        member=who,
+        kind=SaidKind.ANSWERED,
+        value=reply.value,
+        evidence=reply.evidence,
+        confidence=reply.confidence.value,
+        verified=is_quotation_from(reply.evidence, advisory_shown),
+    )
+
+
+def identity_of(member) -> MemberIdentity:
+    """Copy a member's identity into the report's own terms."""
+    return MemberIdentity(
+        name=member.name,
+        provider=member.provider,
+        model=member.model,
+        family=member.family,
+        ran_local=member.ran_local,
+        prompt_version=member.prompt_version,
+        reversed_prompt_version=member.reversed_prompt_version,
+    )
+
+
+def outcome_of(ruling) -> Outcome:
+    """Name what the chairman made of one metric."""
+    if isinstance(ruling, SettledMetric):
+        return Outcome.SETTLED
+    if isinstance(ruling, ContestedMetric):
+        return Outcome.CONTESTED
+    return Outcome.UNRESOLVED
+
+
+def value_of(ruling) -> str:
+    """Give the value a ruling carries, which a contested one does not have."""
+    if isinstance(ruling, SettledMetric):
+        return ruling.value
+    if isinstance(ruling, UnresolvedMetric):
+        return getattr(ruling.fallback, "value", "")
+    return ""
+
+
+def nothing_cross_checked(run) -> bool:
+    """Say whether nothing was cross-checked: one member, or each metric on one quotation."""
+    # A member that guessed every metric leaves each one on the other's quotation alone.
+    return run.single_assessor or all(rests_on_one_quotation(round_) for round_ in run.rounds)
+
+
+def rests_on_one_quotation(round_) -> bool:
+    """Say whether a metric settled on one quotation alone, a member's or the escalation model's."""
+    basis = getattr(round_.ruling, "basis", None)
+    if basis is Basis.ESCALATED:
+        # An escalated contest already has a member's verified quotation; an
+        # unresolved metric has only the escalation model's.
+        return isinstance(round_.escalation.prior, UnresolvedMetric)
+    return basis is Basis.SOLE
+
+
+def basis_of(ruling) -> str:
+    """Say what settled a metric, in the chairman's own words."""
+    basis = getattr(ruling, "basis", None)
+    return basis.value if isinstance(basis, Basis) else ""
+
+
+def confidence_of(ruling) -> str:
+    """Give the confidence a settled metric rests on."""
+    return ruling.confidence.value if isinstance(ruling, SettledMetric) else ""
+
+
+def fallback_source_of(ruling) -> str:
+    """Name the published source an unresolved metric fell back to, if one did."""
+    if not isinstance(ruling, UnresolvedMetric):
+        return ""
+    return getattr(ruling.fallback, "source", "")
