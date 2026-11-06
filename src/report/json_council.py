@@ -1,0 +1,99 @@
+"""What the council did, in the audit record, in full.
+
+Every member's answer and evidence, the models behind them, the chairman's reasoning and the
+final vector. The family is on every member: a roster of one family agreeing is one opinion.
+"""
+
+from typing import Any
+
+from report.council_beside import figure_of
+from report.council_record import (
+    CouncilAssessment,
+    CouncilNotAsked,
+    MemberSaid,
+    MetricEscalation,
+    MetricRuling,
+    ReadingOrder,
+)
+
+
+def council_of(report, advisory_id: str) -> dict[str, Any] | None:
+    """Give what the council did for an advisory, or null where no council ran at all."""
+    outcome = report.council.get(advisory_id)
+    if outcome is None:
+        return None
+    if isinstance(outcome, CouncilNotAsked):
+        # Not null: a council ran but was not put to this finding, which is a result.
+        return {"ran": False, "because": outcome.because}
+    settled = isinstance(outcome, CouncilAssessment)
+    return {
+        "ran": True,
+        "vector": outcome.vector if settled else None,
+        "base_score": figure_of(outcome).base_score if settled else None,
+        "single_assessor": outcome.single_assessor,
+        # Of a vector only: two members reached is not two members checked.
+        "nothing_cross_checked": outcome.nothing_cross_checked if settled else None,
+        "unresolved_metrics": list(getattr(outcome, "unresolved_metrics", ())),
+        "contested_metrics": list(getattr(outcome, "contested_metrics", ())),
+        "metrics": [ruling_of(one) for one in outcome.rulings],
+    }
+
+
+def ruling_of(ruling: MetricRuling) -> dict[str, Any]:
+    """Give one metric: what the chairman decided, and every member behind it."""
+    return {
+        "metric": ruling.metric,
+        "outcome": ruling.outcome.value,
+        "value": ruling.value or None,
+        "basis": ruling.basis or None,
+        "confidence": ruling.confidence or None,
+        "fallback_source": ruling.fallback_source or None,
+        "members": [said_of(one) for one in ruling.said],
+        "escalation": escalation_of(ruling.escalation),
+        "same_evidence_different_reading": ruling.same_evidence_different_reading,
+    }
+
+
+def escalation_of(escalation: MetricEscalation | None) -> dict[str, Any] | None:
+    """Give what the escalation model said of a metric the council left open, or null."""
+    if escalation is None:
+        return None
+    # The prior council outcome, beside what the model said.
+    return {"prior_outcome": escalation.prior.value, **said_of(escalation.said)}
+
+
+def said_of(said: MemberSaid) -> dict[str, Any]:
+    """Give what one member said, and enough of it to reconstruct the roster."""
+    return {
+        "member": said.member.name,
+        "provider": said.member.provider,
+        "model": said.member.model,
+        "family": said.member.family,
+        "ran_local": said.member.ran_local,
+        "prompt_version": said.member.prompt_version,
+        "reversed_prompt_version": said.member.reversed_prompt_version or None,
+        "said": said.kind.value,
+        "value": said.value or None,
+        "evidence": said.evidence or None,
+        "confidence": said.confidence or None,
+        "evidence_verified": said.verified,
+        "reason": said.reason or None,
+        "orders": orders_of(said),
+        "declined_in": orders_named(said, said.declined_in),
+        "unverified_in": orders_named(said, said.unverified_in),
+    }
+
+
+def orders_of(said: MemberSaid) -> dict[str, str] | None:
+    """Give an order-sensitive member's two values, or null for any other kind of reply."""
+    if not said.order_values:
+        return None
+    in_order, reversed_order = said.order_values
+    return {"in_order": in_order, "reversed": reversed_order}
+
+
+def orders_named(said: MemberSaid, orders: tuple[ReadingOrder, ...]) -> list[str] | None:
+    """Name the orders a member did something in, or null where it was asked the options once."""
+    if not said.member.reversed_prompt_version:
+        return None
+    return [one.value for one in orders]

@@ -1,0 +1,111 @@
+"""The parts a finding card is built from, shared by the Disagreements and Agreements tabs.
+
+Every source is a row, in name order; no source is a column. A refused vector stays on the
+card, marked not scored, never as 0.0. `report.html_findings` chooses which cards show.
+"""
+
+from cvss.score import severity_band
+from report.approval_needed import reasons_for
+from report.html_approval import approval_status
+from report.html_council_flag import same_evidence_flag
+from report.html_layout import (
+    CVSS_SCALE,
+    badge,
+    cell,
+    external_link,
+    jump,
+    listing,
+    number,
+    scored_chip,
+    tag,
+    text,
+)
+from report.html_vector import vector_markup
+from report.record import Report
+
+NOTHING_PUBLISHED = "No source published a readable v3 vector."
+
+
+def article(finding, prefix: str, body: str) -> str:
+    """Wrap one finding's card with the id its tab routes to, so a link can scroll to it."""
+    ident = f'id="{prefix}-{text(finding.advisory.advisory_id)}"'
+    return f'<article class="card finding" {ident}>{body}</article>'
+
+
+def card_head(report: Report, finding) -> str:
+    """Head a card with the advisory, the component, and the approval mark where it has one."""
+    installed = f"{finding.component.name} {finding.component.version}"
+    named = tag("span", advisory_name(finding.advisory), "adv")
+    named += tag("span", text(installed), "component")
+    return tag("header", tag("div", named, "title") + approval_badge(report, finding), "card-head")
+
+
+def approval_badge(report: Report, finding) -> str:
+    """Mark a flagged finding with the audit's decision, naming the halves of the rule it meets."""
+    reasons = reasons_for(report, finding)
+    if not reasons:
+        return ""
+    word, tone = approval_status(report.approval)
+    said = " and ".join(reason.value for reason in reasons)
+    return badge(f"{word}: {said}", tone)
+
+
+def council_flag(report: Report, finding) -> str:
+    """Flag on a card the metrics the council read two ways from the same words, if any."""
+    flag = same_evidence_flag(report.council.get(finding.advisory.advisory_id))
+    return tag("p", flag, "card-flag") if flag else ""
+
+
+def advisory_name(advisory) -> str:
+    """Give the advisory's id, linked to its page with an external-link mark, or as plain text."""
+    if advisory.url is None:
+        return text(advisory.advisory_id)
+    return external_link(advisory.url, text(advisory.advisory_id))
+
+
+def source_table(finding) -> str:
+    """Put every source's score and vector in a compact table, one row each, in name order."""
+    head = "<thead><tr><th>Source</th><th>CVSS</th><th>Vector</th></tr></thead>"
+    differing = tuple(finding.disputed_metrics())
+    rows = "".join(source_row(one, differing) for one in finding.scores)
+    return tag("table", head + tag("tbody", rows), "data compact rt")
+
+
+def source_row(score, differing: tuple[str, ...]) -> str:
+    """Give one source: its name, the score its vector comes to, and the vector metric by metric."""
+    band = severity_band(score.base_score)
+    chip = scored_chip(CVSS_SCALE, number(score.base_score), band, "cvss")
+    return "<tr>" + cell("Source", tag("span", text(score.source), "source-name")) + cell(
+        "CVSS", chip
+    ) + cell("Vector", vector_markup(score.vector, differing)) + "</tr>"
+
+
+def unreadable_table(finding) -> str:
+    """List every source this calculator refused, kept as not scored and never as 0.0."""
+    return listing([unreadable_row(one) for one in finding.unreadable], "sources")
+
+
+def unreadable_row(source) -> str:
+    """Give one refused source: what it published, and why the calculator would not read it."""
+    return (
+        tag("span", text(source.source), "source-name")
+        + tag("span", "not scored", "not-scored")
+        + tag("code", text(source.vector), "vector")
+        + tag("span", text(source.refusal), "refusal")
+    )
+
+
+def nothing_published() -> str:
+    """Say that no source published a readable vector for a finding."""
+    return tag("p", text(NOTHING_PUBLISHED), "spread")
+
+
+def card_links(report: Report, finding) -> str:
+    """Link a card to the finding's other views, where those views carry it."""
+    advisory_id = finding.advisory.advisory_id
+    links = []
+    if advisory_id in report.risk:
+        links.append(jump(f"risk/{advisory_id}", text("Org risk") + " &rarr;"))
+    if advisory_id in report.council:
+        links.append(jump(f"council/{advisory_id}", text("Council ruling") + " &rarr;"))
+    return tag("p", "".join(links), "card-links") if links else ""

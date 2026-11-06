@@ -1,0 +1,141 @@
+"""The record for a terminal, led by where the sources disagree.
+
+Findings are split into groups with the contested ones first, ordered by how much their
+disagreement would change a decision. A finding is written by `report.text_findings`; this
+file is the page it goes on.
+"""
+
+from organisation.approval import Approval
+from report.absences import NOTHING_ABSENT
+from report.approval_words import ATTACHED_AFTER_RUN
+from report.provenance import SCORING_RULES_LABEL, AdvisoryDatabase
+from report.record import Report
+from report.summary_words import (
+    approval_count,
+    counts,
+    inventory_pointer,
+    secrets_count,
+    unread_pointer,
+)
+from report.text_approval import approval_needed_block
+from report.text_council import council_block
+from report.text_explanation import explanation_block
+from report.text_findings import agreeing_block, contested_block, unchecked_block, unscored_block
+from report.text_layout import INDENT, SOURCE_SEPARATOR, section, wrapped
+from report.text_risk import risk_block
+from report.text_secrets import secrets_block
+
+# Wide enough for a path, which is what an unidentifiable artifact is named by.
+ARTIFACT_NAME_WIDTH = 42
+
+
+def as_text(report: Report) -> str:
+    """Render the record for a terminal, leading with where the sources disagree."""
+    blocks = [
+        heading(report),
+        summary(report),
+        contested_block(report),
+        explanation_block(report),
+        unchecked_block(report),
+        agreeing_block(report),
+        unscored_block(report),
+        risk_block(report),
+        council_block(report),
+        secrets_block(report),
+        unmatched_block(report),
+        unidentified_block(report),
+        approval_needed_block(report),
+        approval_line(report),
+        absences_block(report),
+    ]
+    body = "\n\n".join(block for block in blocks if block)
+    # Strip trailing spaces that column padding leaves on line ends.
+    return "\n".join(line.rstrip() for line in body.split("\n")) + "\n"
+
+
+def heading(report: Report) -> str:
+    """Name the repository, what scanned it, and the rules that scored it."""
+    run = report.provenance
+    tools = f"syft {run.syft_version}{SOURCE_SEPARATOR}trivy {run.trivy_version}"
+    # On a line of its own: beside the database's build date it runs past the page.
+    return "\n".join([
+        f"Audit of {run.repository}",
+        f"{INDENT}{tools}{SOURCE_SEPARATOR}{database_line(run)}",
+        f"{INDENT}{SCORING_RULES_LABEL} {run.scoring_rules_version}",
+    ])
+
+
+def database_line(run) -> str:
+    """Say when the advisory database was built, or shout that none was read."""
+    # A scan against no database finds nothing and exits 0, so this is not quiet.
+    if isinstance(run.database, AdvisoryDatabase):
+        return f"advisory database built {run.database.built_at}"
+    return f"NO ADVISORY DATABASE DATE: {run.database.reason}"
+
+
+def summary(report: Report) -> str:
+    """Say how much there is, re-flowed to the page, with the pointer to what was left out."""
+    lines = [
+        *wrapped(counts(report), 0),
+        inventory_pointer(report),
+        unread_pointer(report),
+        *wrapped(approval_count(report), 0),
+        secrets_count(report),
+    ]
+    return "\n".join(line for line in lines if line)
+
+
+def unmatched_block(report: Report) -> str:
+    """Count what matched nothing, keeping the two kinds apart."""
+    entries = [
+        f"{INDENT}{len(report.components_without_findings)} components carry no advisory",
+        f"{INDENT}{len(report.advisories_without_components)} advisories matched no component",
+        *overrides_line(report),
+    ]
+    return section("MATCHED NOTHING", entries)
+
+
+def overrides_line(report: Report) -> list[str]:
+    """Name the answer overrides that matched no finding, so a typo cannot be silent."""
+    # A mistyped override would otherwise apply to nothing silently.
+    missed = report.overrides_without_findings
+    if not missed:
+        return []
+    plural = "" if len(missed) == 1 else "s"
+    return [
+        f"{INDENT}{len(missed)} answer override{plural} matched no finding: {', '.join(missed)}"
+    ]
+
+
+def approval_line(report: Report) -> str:
+    """Say who approved this audit, which is the one fact here about a human act."""
+    decided = report.approval
+    if not isinstance(decided, Approval):
+        return ""
+    note = f"{SOURCE_SEPARATOR}{decided.note}" if decided.note else ""
+    entries = [
+        f"{INDENT}{decided.decision.value} by {decided.approver} at {decided.recorded_at}{note}"
+    ]
+    if decided.attached_after_run:
+        entries.append(f"{INDENT}{ATTACHED_AFTER_RUN}")
+    return section("APPROVAL", entries)
+
+
+def unidentified_block(report: Report) -> str:
+    """Name what was catalogued and could never be joined, rather than dropping it."""
+    catalogued = report.unidentified_artifacts
+    if not catalogued:
+        return ""
+    entries = [
+        f"{INDENT}{one.name.ljust(ARTIFACT_NAME_WIDTH)}{one.ecosystem}" for one in catalogued
+    ]
+    return section(f"COULD NOT BE IDENTIFIED ({len(catalogued)})", entries)
+
+
+def absences_block(report: Report) -> str:
+    """Name what this run did not assess, so no reader reads silence as a nil result."""
+    entries = [
+        f"{INDENT}{absence.what}\n{INDENT}{INDENT}{absence.because}"
+        for absence in report.not_assessed
+    ]
+    return section("NOT ASSESSED", entries or [f"{INDENT}{NOTHING_ABSENT}"])

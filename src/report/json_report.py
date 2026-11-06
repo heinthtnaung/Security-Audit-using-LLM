@@ -1,0 +1,169 @@
+"""The audit artefact: the whole record as JSON, re-derivable without this tool.
+
+Every score travels beside its vector. Sources are a list in name order, not a set of fields
+anchored to one source, and a council's reading is written beside them, never into them. The
+bytes are deterministic: fixed key order, stable sorting, no clock.
+"""
+
+import json
+from typing import Any
+
+from report.absences import Absence
+from report.approval_needed import needing_approval, reasons_for
+from report.disagreement import (
+    bands_crossed,
+    carries_a_refused_source,
+    score_spread,
+    sources_disagree,
+)
+from report.json_council import council_of
+from report.json_explanation import explanation_of
+from report.json_local_models import local_models_of
+from report.json_risk import approval_of, risk_of
+from report.json_secrets import secrets_of
+from report.provenance import AdvisoryDatabase
+from report.record import Report
+
+INDENT = 2
+
+
+def as_json(report: Report) -> str:
+    """Render the whole record as the audit artefact, byte for byte the same each run."""
+    return json.dumps(as_dictionary(report), indent=INDENT, sort_keys=False) + "\n"
+
+
+def as_dictionary(report: Report) -> dict[str, Any]:
+    """Give the record as plain data, in the order a reader meets it."""
+    return {
+        "run": run_of(report),
+        "findings": [finding_of(report, finding) for finding in report.findings],
+        "secrets": secrets_of(report),
+        "components_without_findings": list(report.components_without_findings),
+        "advisories_without_components": list(report.advisories_without_components),
+        "overrides_without_findings": list(report.overrides_without_findings),
+        "unidentified_artifacts": [
+            artifact_of(one) for one in report.unidentified_artifacts
+        ],
+        "approval": approval_of(report),
+        "not_assessed": [absence_of(absence) for absence in report.not_assessed],
+    }
+
+
+def run_of(report: Report) -> dict[str, Any]:
+    """Say what produced this report, including whether a database was there to read."""
+    provenance = report.provenance
+    return {
+        "repository": provenance.repository,
+        # Present only for a typed run.
+        **answers_source_of(provenance),
+        "syft_version": provenance.syft_version,
+        "trivy_version": provenance.trivy_version,
+        "advisory_database": database_of(provenance.database),
+        # Which rules weighed and banded the Organisation Risk Score; `scoring.version`.
+        "scoring_rules_version": provenance.scoring_rules_version,
+        # The window and the timeout can change a result, so they sit beside the pinning.
+        "local_models": local_models_of(provenance.local_models),
+        **run_counts(report),
+    }
+
+
+def run_counts(report: Report) -> dict[str, Any]:
+    """Give the run's counts, each a number a reader checks against the findings themselves."""
+    return {
+        "component_count": report.component_count,
+        "finding_count": len(report.findings),
+        # Readable sources only: a refused vector is not a dissent.
+        "findings_whose_sources_disagree": sum(
+            1 for finding in report.findings if sources_disagree(finding)
+        ),
+        # A refused vector cannot be compared: no dissent, no agreement.
+        "findings_with_a_refused_source": sum(
+            1 for finding in report.findings if carries_a_refused_source(finding)
+        ),
+        # By `organisation.approval_rule`; with no answers, only disagreement can mark one.
+        "findings_needing_approval": len(needing_approval(report)),
+        # Not findings: no CVSS, so never scored, weighed or put to the council.
+        "secret_count": len(report.secrets),
+    }
+
+
+def answers_source_of(provenance: Any) -> dict[str, str]:
+    """Name where a run's answers came from, for the typed run alone; a file run names none."""
+    if not provenance.answers_source:
+        return {}
+    return {"answers_source": provenance.answers_source}
+
+
+def database_of(database: Any) -> dict[str, Any]:
+    """Give the database's build date, or say plainly that none could be read."""
+    # A scan against no database finds nothing and exits 0, so "unknown" matters.
+    if isinstance(database, AdvisoryDatabase):
+        return {"built_at": database.built_at, "known": True}
+    return {"known": False, "reason": database.reason}
+
+
+def finding_of(report: Report, finding: Any) -> dict[str, Any]:
+    """Give one finding with every source's assessment beside every other's."""
+    reasons = reasons_for(report, finding)
+    return {
+        "component": component_of(finding),
+        "advisory": advisory_of(finding),
+        "scores": [score_of(score) for score in finding.scores],
+        "unreadable": [unreadable_of(source) for source in finding.unreadable],
+        "disputed_metrics": list(finding.disputed_metrics()),
+        "score_spread": score_spread(finding),
+        "severity_bands": list(bands_crossed(finding)),
+        "council": council_of(report, finding.advisory.advisory_id),
+        "llm_explanation": explanation_of(report, finding.advisory.advisory_id),
+        "organisation_risk": risk_of(report, finding.advisory.advisory_id),
+        "needs_approval": bool(reasons),
+        "approval_reasons": [reason.value for reason in reasons],
+    }
+
+
+def component_of(finding: Any) -> dict[str, Any]:
+    """Name the installed component a finding was raised against."""
+    component = finding.component
+    return {
+        "name": component.name,
+        "version": component.version,
+        "purl": component.purl,
+        "ecosystem": component.ecosystem,
+        "locations": list(component.locations),
+    }
+
+
+def advisory_of(finding: Any) -> dict[str, Any]:
+    """Name the advisory, the fix if one is published, and its own page if Trivy names one."""
+    advisory = finding.advisory
+    return {
+        "advisory_id": advisory.advisory_id,
+        "summary": advisory.summary,
+        "fixed_version": advisory.fixed_version,
+        "url": advisory.url,
+    }
+
+
+def score_of(score: Any) -> dict[str, Any]:
+    """Give one source's published vector and the number derived from it."""
+    # Both, always: the vector is what makes the number checkable by hand.
+    return {"source": score.source, "vector": score.vector, "base_score": score.base_score}
+
+
+def unreadable_of(source: Any) -> dict[str, Any]:
+    """Give one source this calculator refused, kept rather than scored zero."""
+    return {"source": source.source, "vector": source.vector, "refusal": source.refusal}
+
+
+def artifact_of(artifact: Any) -> dict[str, Any]:
+    """Name one thing Syft catalogued that no advisory could ever be joined to."""
+    return {
+        "name": artifact.name,
+        "ecosystem": artifact.ecosystem,
+        "locations": list(artifact.locations),
+    }
+
+
+def absence_of(absence: Absence) -> dict[str, str]:
+    """Give one thing this report does not carry, and why it does not."""
+    return {"what": absence.what, "because": absence.because}

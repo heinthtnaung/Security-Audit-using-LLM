@@ -1,0 +1,51 @@
+"""How a council run's local models were asked, in the audit record: pinning, server and weights.
+
+Every setting, the server version once, and a digest per model, each known or with its reason.
+`remote_host` appears only for a server on another machine; the key keeps its `local_models` name.
+"""
+
+from typing import Any
+
+from report.model_identity import ModelDigest, ModelIdentity, OllamaVersion, ServerVersion
+from report.provenance import LocalModels
+
+
+def local_models_of(local: LocalModels | None) -> dict[str, Any] | None:
+    """Give how the run's local models were asked, or null where no council ran."""
+    if local is None:
+        return None
+    return {
+        "server": local.server,
+        **remote_host_of(local),
+        "context_tokens": local.context_tokens,
+        "timeout_seconds": local.timeout_seconds,
+        "temperature": local.temperature,
+        "seed": local.seed,
+        "think": local.think,
+        "order_check": local.order_check,
+        "escalation_model": local.escalation_model,
+        "ollama_version": version_of(local.ollama_version),
+        "models": [model_of(one) for one in local.models],
+    }
+
+
+def remote_host_of(local: LocalModels) -> dict[str, str]:
+    """Name the server's host where it is another machine, and add nothing where it is this one."""
+    if not local.remote_host:
+        return {}
+    return {"remote_host": local.remote_host}
+
+
+def version_of(version: ServerVersion) -> dict[str, Any]:
+    """Give the server's version, or say plainly that none could be read, and why."""
+    if isinstance(version, OllamaVersion):
+        return {"version": version.version, "known": True}
+    return {"known": False, "reason": version.reason}
+
+
+def model_of(model: ModelIdentity) -> dict[str, Any]:
+    """Give one model the run asks, as what, and the digest of its weights or why it is unknown."""
+    named = {"model": model.model, "role": model.role}
+    if isinstance(model, ModelDigest):
+        return {**named, "digest": model.digest, "known": True}
+    return {**named, "known": False, "reason": model.reason}

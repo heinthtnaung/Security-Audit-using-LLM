@@ -1,0 +1,132 @@
+"""The organisation's half of the audit record: its risk scores and its approval.
+
+Every answer behind a score is here with its weight and contribution, so the number re-derives
+from the record alone. The raw total sits beside the clamped score, and a severity floor beside
+the band it raised. Categories are written once per finding; a council's vector is a field of
+its own, marked unused.
+"""
+
+from typing import Any
+
+from organisation.approval import Approval
+from report.council_beside import COUNCIL_SOURCE, council_figure
+from report.record import Report
+from scoring.question import Category
+
+
+def risk_of(report: Report, advisory_id: str) -> dict[str, Any] | None:
+    """Give what this environment makes of a finding, or null where nobody answered."""
+    weighed = report.risk.get(advisory_id)
+    if weighed is None:
+        return None
+    # Categories are the same for every source; only the technical term moves.
+    return {
+        "scores": [scored_of(one) for one in weighed.scores],
+        "bands": list(weighed.bands),
+        "band_depends_on_the_source": weighed.band_depends_on_the_source,
+        "provisional": weighed.is_provisional,
+        "categories": categories_of(weighed.scores[0]),
+        "council_figure": council_figure_of(report, advisory_id),
+    }
+
+
+def council_figure_of(report: Report, advisory_id: str) -> dict[str, Any] | None:
+    """Give the vector a council settled, beside the scores and not in them, or null for none."""
+    figure = council_figure(report, advisory_id)
+    if figure is None:
+        return None
+    return {
+        "source": COUNCIL_SOURCE,
+        "vector": figure.vector,
+        "base_score": figure.base_score,
+        "used_in_score": False,
+    }
+
+
+def scored_of(scored: Any) -> dict[str, Any]:
+    """Give one organisation score, the technical severity it was weighed from, and its weight."""
+    # Both bands: a floor raises the band, not the number.
+    return {
+        "technical_from": technical_from(scored.technical),
+        "technical_score": scored.technical_score,
+        "technical_weight": weight_of(scored, Category.TECHNICAL),
+        "score": scored.score,
+        "score_band": scored.score_band,
+        "band": scored.band,
+        "floors": [floor_of(one) for one in scored.floors],
+        "provisional": scored.is_provisional,
+        "unknown_questions": list(scored.unknown_questions),
+    }
+
+
+def floor_of(floor: Any) -> dict[str, Any]:
+    """Give one severity floor that raised a band: its rule, the Yes answers, and both bands."""
+    return {
+        "rule_id": floor.rule_id,
+        "answered_yes": list(floor.answered_yes),
+        "band_before": floor.band_before,
+        "band_after": floor.band_after,
+    }
+
+
+def technical_from(technical: Any) -> str:
+    """Say where a technical severity came from, including when nobody offered one."""
+    return getattr(technical, "derived_from", None) or technical.reason
+
+
+def categories_of(scored: Any) -> dict[str, Any]:
+    """Give every category with its weight in the total and the answers that produced it."""
+    named = (
+        ("exposure", scored.exposure),
+        ("business", scored.business),
+        ("threat", scored.threat),
+    )
+    return {
+        name: category_of(category, weight_of(scored, category.category))
+        for name, category in named
+    }
+
+
+def weight_of(scored: Any, category: Category) -> float:
+    """Give what one category was worth in this score's total, found by its name."""
+    weights = {one.category: one.weight for one in scored.weights}
+    return weights[category.value]
+
+
+def category_of(category: Any, weight: float) -> dict[str, Any]:
+    """Give one category's score, its raw total, and every answer behind it."""
+    # Both totals: the clamp is invisible in the score alone.
+    return {
+        "score": category.score,
+        "weight": weight,
+        "raw_total": category.raw_total,
+        "clamped": category.was_clamped,
+        "answers": [answered_of(one) for one in category.answers],
+    }
+
+
+def answered_of(answered: Any) -> dict[str, Any]:
+    """Give one answer, the question it answers, and what it was worth."""
+    return {
+        "question_id": answered.question.question_id,
+        "question": answered.question.text,
+        "answer": answered.answer.value,
+        "yes_weight": answered.question.yes_weight,
+        "contribution": answered.contribution,
+    }
+
+
+def approval_of(report: Report) -> dict[str, Any]:
+    """Give the human decision on this audit, or say plainly that there is none."""
+    decided = report.approval
+    if not isinstance(decided, Approval):
+        return {"approved": False, "reason": decided.reason}
+    return {
+        "approved": True,
+        "approver": decided.approver,
+        "decision": decided.decision.value,
+        "recorded_at": decided.recorded_at,
+        "note": decided.note,
+        # Present only when attached after the run.
+        **({"attached_after_run": True} if decided.attached_after_run else {}),
+    }
